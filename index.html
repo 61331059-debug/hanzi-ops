@@ -732,6 +732,7 @@ function nextCustomLevelId(customLevels){
 
 /* ---------- 语音与音效（沙箱内安全降级，无外部资源） ---------- */
 var _zhVoices=[];
+var _speechUnlocked=false;
 function refreshVoices(){
   try{
     if(!window.speechSynthesis) return;
@@ -749,36 +750,101 @@ try{
     }
   }
 }catch(err){ /* 忽略 */ }
+/* 移动端手势解锁：iOS Safari/WKWebView 与部分 Android Chrome 要求
+   speechSynthesis 在用户手势中先被启动过，否则首次 speak 静默无声。
+   首次触摸/点击时用零音量空句预热引擎，并恢复音频上下文。 */
+function unlockSpeechOnGesture(){
+  if(_speechUnlocked) return;
+  _speechUnlocked=true;
+  try{
+    if(document.documentElement){ document.documentElement.setAttribute('data-speech-unlocked','1'); }
+    if(window.speechSynthesis){
+      window.speechSynthesis.cancel();
+      var warm=new SpeechSynthesisUtterance(' ');
+      warm.volume=0;
+      window.speechSynthesis.speak(warm);
+      window.setTimeout(function(){ try{ window.speechSynthesis.cancel(); }catch(e0){ /* 忽略 */ } },80);
+    }
+    var AC=window.AudioContext||window.webkitAudioContext;
+    if(AC){
+      if(!_ac) _ac=new AC();
+      if(_ac&&_ac.state==='suspended'&&_ac.resume){ try{ _ac.resume(); }catch(e1){ /* 忽略 */ } }
+    }
+  }catch(err){ /* 忽略 */ }
+}
+try{
+  var _gestureEvents=['pointerdown','touchstart','click'];
+  for(var _gi=0;_gi<_gestureEvents.length;_gi++){
+    document.addEventListener(_gestureEvents[_gi],unlockSpeechOnGesture,{passive:true});
+  }
+}catch(err){ /* 忽略 */ }
+/* 中文语音选择：优先 zh-CN（含变体），其次任意 zh；同级优先本地语音 */
+function pickZhVoice(){
+  refreshVoices();
+  if(!_zhVoices.length) return null;
+  var cn=_zhVoices.filter(function(v){ return v&&v.lang&&v.lang.toLowerCase().replace('_','-').indexOf('zh-cn')===0; });
+  var pool=cn.length?cn:_zhVoices;
+  var local=pool.filter(function(v){ return v.localService; });
+  return (local.length?local:pool)[0];
+}
 function speakText(text){
   try{
     var synth=window.speechSynthesis;
     if(!synth) return;
+    if(synth.paused&&synth.resume){ try{ synth.resume(); }catch(e1){ /* 忽略 */ } }
     refreshVoices();
-    var u=new SpeechSynthesisUtterance(String(text));
-    u.lang='zh-CN'; u.rate=0.82; u.pitch=1.15;
-    if(_zhVoices.length){
-      var local=_zhVoices.filter(function(v){ return v.localService; });
-      var pick=(local.length?local:_zhVoices)[0];
-      u.voice=pick;
+    var textStr=String(text);
+    function buildUtterance(){
+      var u=new SpeechSynthesisUtterance(textStr);
+      u.lang='zh-CN'; u.rate=0.82; u.pitch=1.15;
+      var voice=null;
+      try{ voice=pickZhVoice(); }catch(err){ voice=null; }
+      if(voice){
+        if(document.documentElement){ document.documentElement.setAttribute('data-tts-voice',String(voice.name||'')); }
+        try{
+          u.voice=voice;
+        }catch(err){
+          /* 个别浏览器 voice 赋值失败时降级：保留 lang 让引擎选默认语音 */
+        }
+      }
+      return u;
     }
-    var utterance=u;
+    var started=false;
     var attempt=0;
+    var watchdogTimer=null;
+    var utterance=buildUtterance();
+    utterance.onstart=function(){ started=true; };
     function play(){
       if(!window.speechSynthesis) return;
       utterance.onerror=function(ev){
         if(attempt<1&&ev&&ev.error==='interrupted'){
           attempt+=1;
-          window.setTimeout(function(){ try{ window.speechSynthesis.speak(utterance); }catch(err2){ /* 忽略 */ } },80);
+          window.setTimeout(function(){ try{ window.speechSynthesis.speak(buildUtterance()); }catch(err2){ /* 忽略 */ } },80);
         }
       };
-      try{ window.speechSynthesis.speak(utterance); }catch(err2){ /* 忽略 */ }
+      try{
+        window.speechSynthesis.speak(utterance);
+        /* 移动端兜底：个别 Android 引擎 speak 后既不发声也不触发回调，
+           900ms 后仍未开始则取消并重建一次重播 */
+        if(watchdogTimer) window.clearTimeout(watchdogTimer);
+        watchdogTimer=window.setTimeout(function(){
+          try{
+            if(!started&&!synth.speaking&&!synth.pending){
+              window.speechSynthesis.cancel();
+              utterance=buildUtterance();
+              utterance.onstart=function(){ started=true; };
+              window.speechSynthesis.speak(utterance);
+            }
+          }catch(err3){ /* 忽略 */ }
+        },900);
+      }catch(err2){ /* 忽略 */ }
     }
     if(synth.speaking||synth.pending){
-      window.setTimeout(function(){ try{ window.speechSynthesis.cancel(); }catch(err3){ /* 忽略 */ } },0);
-      window.setTimeout(play,90);
-    }else{
       try{ synth.cancel(); }catch(err4){ /* 忽略 */ }
-      window.setTimeout(play,40);
+      window.setTimeout(play,120);
+    }else{
+      /* 空闲时直接同步 speak，保留在用户手势调用栈内（对 iOS 更可靠） */
+      play();
     }
   }catch(err){ /* 无语音环境时静默降级 */ }
 }
