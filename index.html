@@ -731,19 +731,55 @@ function nextCustomLevelId(customLevels){
 }
 
 /* ---------- 语音与音效（沙箱内安全降级，无外部资源） ---------- */
+var _zhVoices=[];
+function refreshVoices(){
+  try{
+    if(!window.speechSynthesis) return;
+    var v=window.speechSynthesis.getVoices()||[];
+    _zhVoices=v.filter(function(x){ return x&&x.lang&&x.lang.toLowerCase().indexOf('zh')===0; });
+  }catch(err){ _zhVoices=[]; }
+}
+try{
+  if(window.speechSynthesis){
+    refreshVoices();
+    if(typeof window.speechSynthesis.onvoiceschanged==='function'){
+      window.speechSynthesis.onvoiceschanged=refreshVoices;
+    }else if('onvoiceschanged' in window.speechSynthesis){
+      window.speechSynthesis.onvoiceschanged=refreshVoices;
+    }
+  }
+}catch(err){ /* 忽略 */ }
 function speakText(text){
   try{
     var synth=window.speechSynthesis;
     if(!synth) return;
-    synth.cancel();
+    refreshVoices();
     var u=new SpeechSynthesisUtterance(String(text));
     u.lang='zh-CN'; u.rate=0.82; u.pitch=1.15;
-    var voices=synth.getVoices();
-    for(var i=0;i<voices.length;i++){
-      var v=voices[i];
-      if(v && v.lang && v.lang.toLowerCase().indexOf('zh')===0){ u.voice=v; break; }
+    if(_zhVoices.length){
+      var local=_zhVoices.filter(function(v){ return v.localService; });
+      var pick=(local.length?local:_zhVoices)[0];
+      u.voice=pick;
     }
-    synth.speak(u);
+    var utterance=u;
+    var attempt=0;
+    function play(){
+      if(!window.speechSynthesis) return;
+      utterance.onerror=function(ev){
+        if(attempt<1&&ev&&ev.error==='interrupted'){
+          attempt+=1;
+          window.setTimeout(function(){ try{ window.speechSynthesis.speak(utterance); }catch(err2){ /* 忽略 */ } },80);
+        }
+      };
+      try{ window.speechSynthesis.speak(utterance); }catch(err2){ /* 忽略 */ }
+    }
+    if(synth.speaking||synth.pending){
+      window.setTimeout(function(){ try{ window.speechSynthesis.cancel(); }catch(err3){ /* 忽略 */ } },0);
+      window.setTimeout(play,90);
+    }else{
+      try{ synth.cancel(); }catch(err4){ /* 忽略 */ }
+      window.setTimeout(play,40);
+    }
   }catch(err){ /* 无语音环境时静默降级 */ }
 }
 var _ac=null;
